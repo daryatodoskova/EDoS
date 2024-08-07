@@ -1,0 +1,16 @@
+#pip install -r thesis/requirements.txt
+
+numpy
+tensorflow
+pandas
+scikit-learn
+argparse
+pandas
+keras
+joblib
+tqdm
+pyspark
+scapy
+Flask
+pyshark
+uuid
