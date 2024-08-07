@@ -1,85 +1,116 @@
 import argparse
 import os
 import sys
-import logging
 from scapy.all import *
-from keras.models import load_model
-import joblib
+from pyspark import *
+from pyspark.context import SparkContext
+import pandas as pd
+from keras.models import Sequential
+from keras.layers import Dense
+import yaml
+import keras
+import ansible.inventory
+from ansible_playbook_runner import Runner
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+def processPcap(fileName):
+    #print('Opening {}...'.format(fileName))
 
-def process_pcap(file_name, client_address='172.16.1.3'):
-    logging.info(f'Opening {file_name}...')
-    
     count = 0
-    data = [[]]
-    nb_of_in_pkt = 0
-    time = []
-    nb_of_bytes = 0
-    
-    for pkt_data, pkt_metadata in RawPcapReader(file_name):
+    #tuple of general packets
+    tuplePKt=[]
+    #tuple of SYN packets
+    tupleSyn=[]
+    #tuple of SYN-ACK packets
+    tupleSynAck=[]
+    #tuple of ACK packets
+    tupleAck=[]
+    #Victim server address
+    clientAddress= '172.16.1.3'
+    #Data list to save to csv file
+    data=[[]]
+    #number of incoming packets
+    nbOfInPkt=0
+    #Time between 2 consecutive forward-direction pkts list
+    time=[]
+    #number of bytes
+    nbOfBytes=0
+    for (pktData, pktMetadata,) in RawPcapReader(fileName):
         count += 1
         
-        ether_pkt = Ether(pkt_data)
-        if 'type' not in ether_pkt.fields:
+        etherPkt = Ether(pktData)
+        if 'type' not in etherPkt.fields:
+            # LLC frames will have 'len' instead of 'type'.
+            # We disregard those
             continue
 
-        if ether_pkt.type != 0x0800:
+        if etherPkt.type != 0x0800:
+            # disregard non-IPv4 packets
             continue
 
-        ip_pkt = ether_pkt[IP]
-        if ip_pkt.src != client_address:
-            nb_of_in_pkt += 1
-            if nb_of_in_pkt == 1:
-                first_pkt_timestamp = ip_pkt.time
-                previous_pkt_timestamp = first_pkt_timestamp
-                continue
-            current_pkt_timestamp = ip_pkt.time
-            time_bw_2_pkt = current_pkt_timestamp - previous_pkt_timestamp
-            previous_pkt_timestamp = current_pkt_timestamp
-            time.append(time_bw_2_pkt)
-            nb_of_bytes += ip_pkt.len
-    
-    data[0].append(nb_of_in_pkt)
-    data[0].append(nb_of_bytes)
-    
-    sum_of_time_bw_2_pkt = sum(time)
-    avr_time_bw_2_pkt = sum_of_time_bw_2_pkt / len(time) if time else 0
-    data[0].append(avr_time_bw_2_pkt)
-    
-    return data, ip_pkt.src
+        ipPkt = etherPkt[IP]
+        #if the packet is from server victim, it is outgoing packet
+        if ipPkt.src!=clientAddress:
+           nbOfInPkt+=1
+           if nbOfInPkt==1:
+              firstPktTimeStamp=ipPkt.time#(pktMetadata.tshigh << 32) | pkt_metadata.tslow
+              previousPktTimeStamp=firstPktTimeStamp
+              continue
+           currentPktTimeStamp=ipPkt.time#(pktMetadata.tshigh << 32) | pkt_metadata.tslow
+           timeBw2Pkt=currentPktTimeStamp-previousPktTimeStamp
+           previousPktTimeStamp=currentPktTimeStamp
+           time.append(timeBw2Pkt)
+           nbOfBytes+=ipPkt.len
+    data[0].append(nbOfInPkt)
+    data[0].append(nbOfBytes)
+    #print(len(time))
+    # Summary of time between 2 consecutive packets in the list
+    sumOfTimeBw2Pkt=0
+    for a in time:
+        sumOfTimeBw2Pkt+=a
+    #print(sumOfTimeBw2Pkt)
+    #Calculate average time between 2 consecutive packets
+    avrTimeBw2Pkt=sumOfTimeBw2Pkt/len(time)
+    data[0].append(avrTimeBw2Pkt)
+    return data, ipPkt.src
 
-def load_model_and_scaler(model_path, scaler_path):
-    model = load_model(model_path)
-    scaler = joblib.load(scaler_path)
-    return model, scaler
+def flowDetector(data):
+    #load ANN model
+    model = keras.models.load_model('models/model_flow.h5')
+    #predict a flow:
+    flow_type = (model.predict(data)>0.5).astype(int)
 
-def flow_detector(data, model):
-    flow_type = (model.predict(data) > 0.5).astype(int)
     return flow_type
 
-def main():
+if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='PCAP reader')
-    parser.add_argument('--pcap', metavar='<pcap file name>', help='pcap file to parse', required=True)
+    parser.add_argument('--pcap', metavar='<pcap file name>',
+                        help='pcap file to parse', required=True)
     args = parser.parse_args()
     
-    file_name = args.pcap
-    if not os.path.isfile(file_name):
-        logging.error(f'"{file_name}" does not exist')
+    fileName = args.pcap
+    if not os.path.isfile(fileName):
+        print('"{}" does not exist'.format(fileName), file=sys.stderr)
         sys.exit(-1)
-    
-    model, scaler = load_model_and_scaler('models/model_flow.h5', 'models/flow_scaler.gz')
-    
-    flow_features, ip_address = process_pcap(file_name)
-    flow_features = scaler.transform(flow_features)
-    
-    is_abnormal_flow = flow_detector(flow_features, model)
-    
-    if is_abnormal_flow:
-        logging.info(f'"{ip_address}" is an attacker')
-    else:
-        logging.info(f'"{ip_address}" is a normal user')
+    #load scaler
+    scaler=joblib.load('models/flow_scaler.gz')
+    #Extract feature of a flow from a pcap file
+    flowFeatures, ipAddress = processPcap(fileName)
+    #Normalizing the collected data
+    flowFeatures = scaler.transform(flowFeatures)
+    # Detect abnormal flow
+    isAbnormalFlow = flowDetector(flowFeatures)
 
-if __name__ == '__main__':
-    main()
+    if isAbnormalFlow:
+        print('"{}" is an attacker'.format(ipAddress))
+    #update Ip address of abnormal flow to firewall
+        print('"Blocking {}..."'.format(ipAddress))
+        with open(r'./vars.yaml') as f:
+            doc = yaml.full_load(f)
+
+        doc['ip_address'] = ipAddress
+        with open('./vars.yaml', 'w') as f:
+            yaml.dump(doc, f)
+        Runner(['hosts'], "update_blacklist_iptable_playbook.yaml").run()
+        print("Blocked successuly")
+    else :
+        print('"{}" is a normal user'.format(ipAddress))

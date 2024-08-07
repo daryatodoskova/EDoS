@@ -3,16 +3,18 @@ import os
 import sys
 import pandas as pd
 import keras
+import numpy as np
 import joblib
 from tqdm import tqdm
 from pyspark import SparkContext
+import onnxruntime as ort
 from scapy.all import Ether, IP, TCP, UDP, RawPcapReader
 import logging
 logging.getLogger('werkzeug').setLevel(logging.ERROR)
 
 class Config:
     SERVER_ADDRESS = '192.168.64.1' #'192.168.10.115'  
-    MODEL_PATH = 'thesis/models/period_model_kan.onnx'
+    MODEL_PATH = 'thesis/training/period_model_kan.onnx'
     SCALER_PATH = 'thesis/models/period_scaler.gz'
     DISPLAY_FILTER = 'http'
 
@@ -148,21 +150,42 @@ class PeriodDetector:
         return data
         
         
-
     def detect_period(self, pcap_file):
         print("Detecting period...")
+        # Extract features and convert to NumPy array
         features = self.process_pcap(pcap_file)
-        if features is None:
+        
+        # Check if features is a list and convert to NumPy array
+        if isinstance(features, list):
+            features = np.array(features)
+        
+        # Print feature shape for debugging
+        print("Features shape:", features.shape)
+        
+        if features is None or features.size == 0:
             print("No features found")
             return False
-        normalized_features = self.scaler.transform(features)
-
+        
         # Prepare input for ONNX model
         input_name = self.session.get_inputs()[0].name
+        expected_shape = self.session.get_inputs()[0].shape
+        print(f"Expected input shape: {expected_shape}")
+
+        # Ensure features have the correct shape for normalization
+        if len(features.shape) == 1:
+            features = features.reshape(1, -1)  # Add batch dimension if needed
+        
+        # Normalize features
+        normalized_features = self.scaler.transform(features)
+        
+        print("Normalized features shape:", normalized_features.shape)
+        
+        # Perform model inference
         prediction = self.session.run(None, {input_name: normalized_features.astype(np.float32)})[0]
         
         print(f"Prediction: {prediction}")
         return bool(prediction[0][0])  # Ensure it returns a boolean value
+
     
     def close(self):
         self.sc.stop()

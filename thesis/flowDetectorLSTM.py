@@ -1,69 +1,68 @@
-import os
+import argparse
 import joblib
 import numpy as np
 import pandas as pd
-import pyshark
 from keras.models import load_model
 from sklearn.preprocessing import MinMaxScaler
+import pyshark
 
 class Config:
-    MODEL_PATH = '../models/flow_model_lstm.h5'
-    SCALER_PATH = '../models/flow_scaler.gz'
+    MODEL_PATH = 'thesis/models/model_flow.h5'
+    SCALER_PATH = 'thesis/models/flow_scaler.gz'
 
 class FlowDetector:
     def __init__(self):
+        # Load the scaler and model
         self.scaler = joblib.load(Config.SCALER_PATH)
         self.model = load_model(Config.MODEL_PATH)
-        print("LSTM model loaded successfully.")
+        print("Model and scaler loaded successfully.")
 
+    def extract_features(self, pcap_file):
+        # Dummy feature extraction function, replace with actual extraction logic
+        print(f"Extracting features from {pcap_file}...")
+        features = []
+
+        # Example of extracting features
+        cap = pyshark.FileCapture(pcap_file)
+        for pkt in cap:
+            ip_src = pkt.ip.src
+            ip_dst = pkt.ip.dst
+            # Add more features as needed
+            features.append([ip_src, ip_dst])
+        
+        cap.close()
+        return features
+
+    def detect_flow(self, features):
+        # Prepare data for model prediction
+        features = np.array(features)
+        normalized_features = self.scaler.transform(features)
+        
+        # Predict using the model
+        predictions = self.model.predict(normalized_features)
+        
+        # Determine if the flow is abnormal
+        for i, prediction in enumerate(predictions):
+            if prediction > 0.5:
+                print(f"Flow from {features[i][0]} is abnormal.")
+            else:
+                print(f"Flow from {features[i][0]} is normal.")
+                
     def process_pcap(self, pcap_file):
-        capture = pyshark.FileCapture(pcap_file)
-        flow_features = []
-
-        for packet in capture:
-            try:
-                if 'IP' in packet:
-                    src = packet.ip.src
-                    dst = packet.ip.dst
-                    protocol = packet.transport_layer
-                    length = packet.length
-
-                    if protocol == 'TCP' or protocol == 'UDP':
-                        sport = packet[packet.transport_layer].srcport
-                        dport = packet[packet.transport_layer].dstport
-                    else:
-                        sport = 0
-                        dport = 0
-
-                    flow_features.append([src, dst, sport, dport, protocol, length])
-            except AttributeError as e:
-                continue
-
-        capture.close()
-        return pd.DataFrame(flow_features, columns=['src', 'dst', 'sport', 'dport', 'protocol', 'length'])
-
-    def detect_anomalies(self, pcap_file):
-        df = self.process_pcap(pcap_file)
-        if df.empty:
-            print("No flows to process.")
-            return []
-
-        X = df[['src', 'dst', 'sport', 'dport', 'length']].values
-        X_scaled = self.scaler.transform(X)
-        X_reshaped = X_scaled.reshape((X_scaled.shape[0], 1, X_scaled.shape[1]))
-
-        predictions = self.model.predict(X_reshaped)
-        anomalies = (predictions > 0.5).astype("int32").flatten()
-
-        return df[anomalies == 1]
+        features = self.extract_features(pcap_file)
+        if features:
+            self.detect_flow(features)
+        else:
+            print("No features extracted.")
 
 if __name__ == "__main__":
-    detector = FlowDetector()
-    pcap_file = 'path_to_pcap_file.pcap'  # Update with actual pcap file path
-    anomalies = detector.detect_anomalies(pcap_file)
+    parser = argparse.ArgumentParser(description="Flow Detection using LSTM model.")
+    parser.add_argument("--pcap", required=True, help="Path to the pcap file.")
+    args = parser.parse_args()
 
-    if not anomalies.empty:
-        print("Anomalous flows detected:")
-        print(anomalies)
-    else:
-        print("No anomalous flows detected.")
+    if not os.path.isfile(args.pcap):
+        print(f'File "{args.pcap}" does not exist.')
+        sys.exit(-1)
+
+    detector = FlowDetector()
+    detector.process_pcap(args.pcap)
